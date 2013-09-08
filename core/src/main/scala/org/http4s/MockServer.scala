@@ -4,7 +4,7 @@ import scala.language.reflectiveCalls
 
 import concurrent.{Await, ExecutionContext, Future}
 import concurrent.duration._
-import play.api.libs.iteratee.{Enumerator, Iteratee}
+import play.api.libs.iteratee.{Enumeratee, Enumerator, Iteratee}
 
 class MockServer(route: Route)(implicit executor: ExecutionContext = ExecutionContext.global) {
   import MockServer.Response
@@ -12,11 +12,16 @@ class MockServer(route: Route)(implicit executor: ExecutionContext = ExecutionCo
   def apply(req: RequestPrelude, enum: Enumerator[HttpChunk]): Future[Response] = {
     try {
       route.lift(req).fold(Future.successful(onNotFound)) { parser =>
-        val it: Iteratee[HttpChunk, Response] = parser.flatMap { responder =>
-          val responseBodyIt: Iteratee[BodyChunk, BodyChunk] = Iteratee.consume()
-          responder.body ><> BodyParser.whileBodyChunk &>> responseBodyIt map { bytes: BodyChunk =>
+
+        val it: Iteratee[HttpChunk, Response] = parser.flatMap {
+          case responder: Responder =>
+            val responseBodyIt: Iteratee[BodyChunk, BodyChunk] = Iteratee.consume()
+          // I'm not sure why we are compelled to make this complicated looking...
+          responder.body ><> BodyParser.whileBodyChunk &>> responseBodyIt map{ bytes: BodyChunk =>
             Response(responder.prelude.status, responder.prelude.headers, body = bytes.toArray)
           }
+
+          case responder: SocketResponder => ???
         }
         enum.run(it)
       }

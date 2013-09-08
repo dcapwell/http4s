@@ -1,8 +1,9 @@
 package org.http4s.util
 package middleware
 
-import org.http4s.{Responder, HttpChunk, Route, RequestPrelude}
+import org.http4s._
 import play.api.libs.iteratee.Iteratee
+import scala.Some
 
 /**
  * @author Bryce Anderson
@@ -19,7 +20,7 @@ object URITranslation {
         else None
       }
 
-      def apply(req: RequestPrelude): Iteratee[HttpChunk, Responder] =
+      def apply(req: RequestPrelude): Iteratee[HttpChunk, ResponderBase] =
         in(stripPath(req).getOrElse(throw new MatchError(s"Missing Context: '$newPrefix'")))
 
       def isDefinedAt(x: RequestPrelude): Boolean = stripPath(x) match {
@@ -30,7 +31,7 @@ object URITranslation {
   }
 
   def TranslatePath(trans: String => String)(in: Route): Route = new Route {
-    def apply(req: RequestPrelude): Iteratee[HttpChunk, Responder] =
+    def apply(req: RequestPrelude): Iteratee[HttpChunk, ResponderBase] =
         in(req.copy(pathInfo = trans(req.pathInfo)))
 
     def isDefinedAt(req: RequestPrelude): Boolean =

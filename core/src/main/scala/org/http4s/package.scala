@@ -21,7 +21,7 @@ import org.http4s.attributes.AppScope
 
 
 package object http4s {
-  type Route = PartialFunction[RequestPrelude, Iteratee[HttpChunk, Responder]]
+  type Route = PartialFunction[RequestPrelude, Iteratee[HttpChunk, ResponderBase]]
 
   type ResponderBody = Enumeratee[HttpChunk, HttpChunk]
 
@@ -29,6 +29,7 @@ package object http4s {
 
   private[http4s] implicit def string2Http4sString(s: String) = new Http4sString(s)
 
+  @deprecated("Doesn't seem to be in use besides in scopes, and I think that is old.")
   trait RouteHandler {
     implicit val appScope = AppScope()
     val attributes = appScope.newAttributesView()

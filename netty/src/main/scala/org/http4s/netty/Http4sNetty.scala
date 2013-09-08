@@ -116,7 +116,10 @@ abstract class Http4sNetty(implicit executor: ExecutionContext)
     val parser = try { route.lift(request).getOrElse(Done(NotFound(request))) }
     catch { case t: Throwable => Done[HttpChunk, Responder](InternalServerError(t)) }
 
-    val handler = parser.flatMap(renderResponse(ctx, req, _))
+    val handler = parser.flatMap{
+      case responder: Responder => renderResponse(ctx, req, responder)
+      case websocket: SocketResponder => ???
+    }
     enum.run[Unit](handler)
   }
 

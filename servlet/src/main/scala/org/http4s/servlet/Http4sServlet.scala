@@ -40,21 +40,23 @@ class Http4sServlet(route: Route, chunkSize: Int = DefaultChunkSize)
     val parser = try {
       route.lift(request).getOrElse(Done(NotFound(request)))
     } catch { case t: Throwable => Done[HttpChunk, Responder](InternalServerError(t)) }
-    val handler = parser.flatMap { responder =>
-      servletResponse.setStatus(responder.prelude.status.code, responder.prelude.status.reason)
-      for (header <- responder.prelude.headers)
-        servletResponse.addHeader(header.name, header.value)
-      import HttpEncodings.chunked
-      val isChunked =
-        responder.prelude.headers.get(HttpHeaders.TransferEncoding).map(_.coding.matches(chunked)).getOrElse(false)
-      responder.body.transform(Iteratee.foreach {
-        case BodyChunk(chunk) =>
-          val out = servletResponse.getOutputStream
-          out.write(chunk.toArray)
-          if(isChunked) out.flush()
-        case t: TrailerChunk =>
-          log("The servlet adapter does not implement trailers. Silently ignoring.")
-      })
+
+    val handler = parser.flatMap {
+      case responder: Responder =>
+        servletResponse.setStatus(responder.prelude.status.code, responder.prelude.status.reason)
+        for (header <- responder.prelude.headers)
+          servletResponse.addHeader(header.name, header.value)
+        import HttpEncodings.chunked
+        val isChunked = responder.prelude.headers.get(HttpHeaders.TransferEncoding).map(_.coding.matches(chunked)).getOrElse(false)
+        responder.body.transform(Iteratee.foreach {
+          case BodyChunk(chunk) =>
+            val out = servletResponse.getOutputStream
+            out.write(chunk.toArray)
+            if(isChunked) out.flush()
+          case t: TrailerChunk =>
+            log("The servlet adapter does not implement trailers. Silently ignoring.")
+        })
+      case _: SocketResponder => sys.error("Websockets not supported.")
     }
     Enumerator.fromStream(servletRequest.getInputStream, chunkSize)
       .map[HttpChunk](BodyChunk(_))

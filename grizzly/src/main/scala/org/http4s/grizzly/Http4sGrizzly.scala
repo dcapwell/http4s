@@ -5,11 +5,12 @@ import org.glassfish.grizzly.http.server.{Response,Request=>GrizReq, HttpHandler
 
 import java.net.InetAddress
 import scala.collection.JavaConverters._
-import concurrent.{ExecutionContext}
+import concurrent.ExecutionContext
 import play.api.libs.iteratee.{Concurrent, Done}
 import org.http4s.Status.{InternalServerError, NotFound}
 import org.glassfish.grizzly.ReadHandler
-import scala.util.Try
+import org.http4s.Status.NotFound
+import org.http4s.RequestPrelude
 
 /**
  * @author Bryce Anderson
@@ -20,11 +21,12 @@ class Http4sGrizzly(route: Route, chunkSize: Int = 32 * 1024)(implicit executor:
   override def service(req: GrizReq, resp: Response) {
     resp.suspend()  // Suspend the response until we close it
     val request = toRequest(req)
+
     val parser = try {
       route.lift(request).getOrElse(Done(NotFound(request)))
     } catch { case t: Throwable => Done[HttpChunk, Responder](InternalServerError(t)) }
 
-    val handler = parser.flatMap { responder =>
+    val handler = parser.flatMap { case responder: Responder =>
       resp.setStatus(responder.prelude.status.code, responder.prelude.status.reason)
       for (header <- responder.prelude.headers)
         resp.addHeader(header.name, header.value)
@@ -33,6 +35,8 @@ class Http4sGrizzly(route: Route, chunkSize: Int = 32 * 1024)(implicit executor:
       val isChunked = responder.prelude.headers.get(HttpHeaders.TransferEncoding).map(_.coding.matches(chunked)).getOrElse(false)
       val out = new OutputIteratee(resp.getNIOOutputStream, isChunked)
       responder.body.transform(out)
+
+    case _: SocketResponder => sys.error(s"Http4sGrizzly captured a websocket route: ${req.getRequestURI} ")
     }
 
     var canceled = false
@@ -61,7 +65,6 @@ class Http4sGrizzly(route: Route, chunkSize: Int = 32 * 1024)(implicit executor:
     val input = req.getNIOInputStream
     RequestPrelude(
       requestMethod = Method(req.getMethod.toString),
-
       scriptName = req.getContextPath, // + req.getServletPath,
       pathInfo = Option(req.getPathInfo).getOrElse(""),
       queryString = Option(req.getQueryString).getOrElse(""),

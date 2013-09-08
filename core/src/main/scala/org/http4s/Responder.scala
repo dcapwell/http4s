@@ -6,11 +6,14 @@ import java.net.{URL, URI}
 import reflect.ClassTag
 import util.DateTime
 
+import scala.Some
+import websocket._
+
+sealed trait ResponderBase
 
 case class Responder(
   prelude: ResponsePrelude,
-  body: ResponderBody = Responder.EmptyBody
-) {
+  body: ResponderBody = Responder.EmptyBody) extends ResponderBase {
   def contentType: Option[ContentType] =  Responder.getContentType(this)
   def contentType(contentType: ContentType) = Responder.setContentType(this, contentType)
   def addCookie(cookie: HttpCookie) = Responder.addCookie(this, cookie)
@@ -18,6 +21,17 @@ case class Responder(
   def addHeader(header: HttpHeader) = Responder.addHeader(this, header)
   def status = Responder.getStatus(this)
   def status[T <% Status](status: T) = Responder.setStatus(this, status)
+}
+
+// The socket type makes this not a good candidate for a case class
+trait SocketResponder extends ResponderBase {
+  def socket: SocketRoute
+}
+
+object WebSocket {
+  def apply(f: => (Iteratee[WebMessage,_], Enumerator[WebMessage])): Iteratee[HttpChunk,SocketResponder] = {
+    Done(new SocketResponder { def socket =  () => f })
+  }
 }
 
 object Responder {
