@@ -4,23 +4,28 @@ import play.api.libs.iteratee._
 import org.http4s.HttpChunk
 import scala.concurrent.{ExecutionContext, Promise, Future}
 import scala.util.{Failure, Success}
+import org.http4s.websocket.WebMessage
+import io.netty.handler.codec.http.websocketx.WebSocketServerHandshaker
 
 /**
  * @author Bryce Anderson
  *         Created on 9/1/13
  */
 
+class ChunkEnum(implicit ec: ExecutionContext) extends PushEnum[HttpChunk]
 
-class ChunkEnum(implicit ec: ExecutionContext) extends Enumerator[HttpChunk] {
-  private var i: Future[Iteratee[HttpChunk, _]] = null
-  private val p = Promise[Iteratee[HttpChunk, _]]
+class SocketEnum(val handshaker: WebSocketServerHandshaker)(implicit ec: ExecutionContext) extends PushEnum[WebMessage]
 
-  def apply[A](i: Iteratee[HttpChunk, A]): Future[Iteratee[HttpChunk, A]] = {
+sealed abstract class PushEnum[T](implicit ec: ExecutionContext) extends Enumerator[T] {
+  private var i: Future[Iteratee[T, _]] = null
+  private val p = Promise[Iteratee[T, _]]
+
+  def apply[A](i: Iteratee[T, A]): Future[Iteratee[T, A]] = {
     this.i = Future.successful(i)
-    p.future.asInstanceOf[Future[Iteratee[HttpChunk, A]]]
+    p.future.asInstanceOf[Future[Iteratee[T, A]]]
   }
 
-  def push(chunk: HttpChunk) {
+  def push(chunk: T) {
     assert(i != null)
     i = i.flatMap(_.pureFold {
       case Step.Cont(f) =>

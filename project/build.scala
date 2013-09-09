@@ -46,7 +46,6 @@ object build extends Build {
   lazy val examples = Project(
     "examples",
     file("examples"),
-
-    settings = http4sSettings ++ Revolver.settings ++ Seq(mainClass in Revolver.reStart := Some("org.http4s.grizzly.WebSocketExample")) //Temporary
+    settings = http4sSettings ++ Revolver.settings ++ Seq(mainClass in Revolver.reStart := Some("org.http4s.examples.netty.Netty4WebsocketExample")) //Temporary
   ) dependsOn(grizzly, netty, servlet)
 }

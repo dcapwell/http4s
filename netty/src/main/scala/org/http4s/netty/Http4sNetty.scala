@@ -26,8 +26,19 @@ import io.netty.util.{ReferenceCountUtil, CharsetUtil}
 import io.netty.buffer.{Unpooled, ByteBuf}
 import org.http4s.HttpHeaders.RawHeader
 import io.netty.handler.ssl.SslHandler
-import io.netty.handler.codec.http.{HttpServerCodec, DefaultHttpContent, DefaultFullHttpResponse}
+import io.netty.handler.codec.http.{HttpObjectAggregator, HttpServerCodec, DefaultHttpContent, DefaultFullHttpResponse}
 import scala.collection.mutable.ListBuffer
+import io.netty.handler.codec.http.websocketx._
+import org.http4s.websocket._
+import akka.util.ByteString
+import org.http4s.HttpHeaders.RawHeader
+import scala.Some
+import org.http4s.TrailerChunk
+import org.http4s.HttpHeaders.RawHeader
+import scala.Some
+import org.http4s.TrailerChunk
+import org.http4s.websocket.StringMessage
+import org.http4s.websocket.ByteMessage
 
 
 object Http4sNetty {
@@ -45,7 +56,7 @@ abstract class Http4sNetty(implicit executor: ExecutionContext)
 
   val serverSoftware = ServerSoftware("HTTP4S / Netty")
 
-  private var enum: ChunkEnum = null
+  private var enum: PushEnum[_] = null
 
   // Just a front method to forward the request and finally release the buffer
   override def channelRead(ctx: ChannelHandlerContext, msg: Object) {
@@ -79,21 +90,39 @@ abstract class Http4sNetty(implicit executor: ExecutionContext)
       startHttpRequest(ctx, req, ctx.channel().remoteAddress().asInstanceOf[InetSocketAddress].getAddress)
 
     case c: http.LastHttpContent =>
-      assert(enum != null)
+      assert(enum.isInstanceOf[ChunkEnum])
       if (c.content().readableBytes() > 0)
-        enum.push(buffToBodyChunk(c.content))
+        enum.asInstanceOf[ChunkEnum].push(buffToBodyChunk(c.content))
 
       if (!c.trailingHeaders().isEmpty)
-        enum.push(TrailerChunk(toHeaders(c.trailingHeaders())))
+        enum.asInstanceOf[ChunkEnum].push(TrailerChunk(toHeaders(c.trailingHeaders())))
 
       enum.close()
       enum = null
 
     case chunk: http.HttpContent =>
-      assert(enum != null)
-      enum.push(buffToBodyChunk(chunk.content))
+      assert(enum.isInstanceOf[ChunkEnum])
+      enum.asInstanceOf[ChunkEnum].push(buffToBodyChunk(chunk.content))
+
+    case frame: WebSocketFrame =>
+      assert(enum.isInstanceOf[SocketEnum])
+      handleSocketFrame(ctx, frame, enum.asInstanceOf[SocketEnum])
 
     case msg => forward(ctx, msg)// Done know what it is...
+  }
+
+  private def handleSocketFrame(ctx: ChannelHandlerContext, frame: WebSocketFrame, enum: SocketEnum): Unit = frame match {
+    case frame: TextWebSocketFrame => enum.push(StringMessage(frame.text()))
+
+    case frame: BinaryWebSocketFrame =>
+      enum.push(ByteMessage(ByteString(frame.content.nioBuffer())))
+
+    case frame: CloseWebSocketFrame =>
+      enum.handshaker.close(ctx.channel(), (frame.retain()))
+
+
+    case frame: PingWebSocketFrame =>
+        ctx.channel().write(new PongWebSocketFrame(frame.content().retain()))
   }
 
   private def forward(ctx: ChannelHandlerContext, msg: AnyRef) {
@@ -110,17 +139,72 @@ abstract class Http4sNetty(implicit executor: ExecutionContext)
   }
 
   private def startHttpRequest(ctx: ChannelHandlerContext, req: http.HttpRequest, rem: InetAddress) {
+    println("Received request... " + req.getClass)
+    println(req)
+
+    new HttpObjectAggregator(100)
+
     if (enum != null) stateError(req)
-    else enum = new ChunkEnum
+
+    val chunkEnum = new ChunkEnum
+    enum = chunkEnum
+
     val request = toRequest(ctx, req, rem)
     val parser = try { route.lift(request).getOrElse(Done(NotFound(request))) }
     catch { case t: Throwable => Done[HttpChunk, Responder](InternalServerError(t)) }
 
     val handler = parser.flatMap{
       case responder: Responder => renderResponse(ctx, req, responder)
-      case websocket: SocketResponder => ???
+      case websocket: SocketResponder if (req.isInstanceOf[http.FullHttpRequest]) =>
+          startWebsocket(ctx, websocket, req.asInstanceOf[http.FullHttpRequest])
+          Done(())
+
+      case _ =>
+        renderResponse(ctx, req, InternalServerError())
+        Done(())
     }
-    enum.run[Unit](handler)
+    chunkEnum.run[Unit](handler)
+  }
+
+  private def startWebsocket(ctx: ChannelHandlerContext, responder: SocketResponder, req: http.FullHttpRequest) {
+    println("Starting websocket request.")
+    val wsPath = "ws://" + req.headers().get(http.HttpHeaders.Names.HOST) + req.getUri
+    val wsFactory = new WebSocketServerHandshakerFactory(
+      wsPath, null, false)
+
+    val handshaker = wsFactory.newHandshaker(req)
+
+    if (handshaker == null) {
+      WebSocketServerHandshakerFactory.sendUnsupportedWebSocketVersionResponse(ctx.channel())
+    } else {
+      handshaker.handshake(ctx.channel(), req)
+      val socketEnum = new SocketEnum(handshaker)
+      enum = socketEnum
+      val (it, e) = responder.socket()
+
+      socketEnum.apply(it)
+
+      def websocketFolder(input: Input[WebMessage]): Iteratee[WebMessage, Unit] = if (ctx.channel.isOpen) input match {
+        case Input.El(ByteMessage(bytes)) =>
+          ctx.channel.writeAndFlush(new BinaryWebSocketFrame(Unpooled.wrappedBuffer(bytes.toArray)))
+          Cont(websocketFolder)
+
+        case Input.El(StringMessage(str)) =>
+          ctx.channel.writeAndFlush(new TextWebSocketFrame(str))
+          Cont(websocketFolder)
+
+        case Input.Empty =>
+          Cont(websocketFolder)
+
+        case Input.EOF =>
+          handshaker.close(ctx.channel, new CloseWebSocketFrame())
+             .onComplete(_ => socketEnum.close())
+          Done(())
+
+      } else Done(())
+
+      e.run(Cont(websocketFolder))
+    }
   }
 
   protected def chunkedIteratee(ctx: ChannelHandlerContext, f: ChannelFuture, isHttp10: Boolean, closeOnFinish: Boolean) = {

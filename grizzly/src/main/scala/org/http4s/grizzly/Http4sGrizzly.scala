@@ -26,17 +26,18 @@ class Http4sGrizzly(route: Route, chunkSize: Int = 32 * 1024)(implicit executor:
       route.lift(request).getOrElse(Done(NotFound(request)))
     } catch { case t: Throwable => Done[HttpChunk, Responder](InternalServerError(t)) }
 
-    val handler = parser.flatMap { case responder: Responder =>
-      resp.setStatus(responder.prelude.status.code, responder.prelude.status.reason)
-      for (header <- responder.prelude.headers)
-        resp.addHeader(header.name, header.value)
+    val handler = parser.flatMap {
+      case responder: Responder =>
+        resp.setStatus(responder.prelude.status.code, responder.prelude.status.reason)
+        for (header <- responder.prelude.headers)
+          resp.addHeader(header.name, header.value)
 
-      import HttpEncodings.chunked
-      val isChunked = responder.prelude.headers.get(HttpHeaders.TransferEncoding).map(_.coding.matches(chunked)).getOrElse(false)
-      val out = new OutputIteratee(resp.getNIOOutputStream, isChunked)
-      responder.body.transform(out)
+        import HttpEncodings.chunked
+        val isChunked = responder.prelude.headers.get(HttpHeaders.TransferEncoding).map(_.coding.matches(chunked)).getOrElse(false)
+        val out = new OutputIteratee(resp.getNIOOutputStream, isChunked)
+        responder.body.transform(out)
 
-    case _: SocketResponder => sys.error(s"Http4sGrizzly captured a websocket route: ${req.getRequestURI} ")
+      case _: SocketResponder => sys.error(s"Http4sGrizzly captured a websocket route: ${req.getRequestURI} ")
     }
 
     var canceled = false
