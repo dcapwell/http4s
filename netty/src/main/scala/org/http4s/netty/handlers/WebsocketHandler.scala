@@ -25,15 +25,22 @@ import scala.concurrent.ExecutionContext
  * @author Bryce Anderson
  *         Created on 9/9/13
  */
-class WebsocketHandler(responder: SocketResponder, nettyHandler: Http4sNetty)(implicit ec: ExecutionContext)
+class WebsocketHandler(nettyHandler: Http4sNetty)(implicit ec: ExecutionContext)
                   extends ChannelInboundHandlerAdapter with Logging {
 
   private var enum: SocketEnum = null
 
   // Just a front method to forward the request and finally release the buffer
   override def channelRead(ctx: ChannelHandlerContext, msg: Object) {
-    try {
-      doRead(ctx, msg)
+    try msg match {
+      case frame: WebSocketFrame =>
+        assert(enum != null)
+        handleSocketFrame(ctx, frame)
+
+      case msg =>
+        ReferenceCountUtil.retain(msg)    // We will be releasing this ref, so need to inc to keep consistent
+        ctx.fireChannelRead(msg)
+
     } finally {
       ReferenceCountUtil.release(msg)
     }
@@ -41,7 +48,7 @@ class WebsocketHandler(responder: SocketResponder, nettyHandler: Http4sNetty)(im
 
   override def exceptionCaught(ctx: ChannelHandlerContext, cause: Throwable) {
     logger.trace("Caught exception: %s", cause.getStackTraceString)
-    // TODO: Propper exception handling for websockets
+    // TODO: Proper exception handling for websockets
     printf("Caught exception: %s\n", cause.getStackTraceString)
     try {
       if (ctx.channel.isOpen) {
@@ -57,12 +64,24 @@ class WebsocketHandler(responder: SocketResponder, nettyHandler: Http4sNetty)(im
     }
   }
 
-  private def doRead(ctx: ChannelHandlerContext, msg: AnyRef): Unit = msg match {
+  def startWebSocket(ctx: ChannelHandlerContext, req: http.HttpRequest, responder: SocketResponder): Iteratee[HttpChunk, Unit] = {
+    // Accumulate the rest of the chunks
+    val buff = ctx.alloc().buffer()
+    def folder(input: Input[HttpChunk]): Iteratee[HttpChunk, ByteBuf] = input match {
+      case Input.El(BodyChunk(bytes)) => buff.writeBytes(bytes.toArray); Cont(folder)
+      case Input.El(TrailerChunk(_)) => sys.error("Cannot accept trailers when staring a WebSocket.")  // TODO: is this correct exception behavior?
+      case Input.Empty => Cont(folder)
+      case Input.EOF => Done(buff)
+    }
 
-    case frame: WebSocketFrame => handleSocketFrame(ctx, frame)
-
-    case msg => forward(ctx, msg)// Don't know what it is...
+    // Accumulate the data, then turn it into a FullHttpRequest for the WebSocketServerHandshaker
+    Cont(folder).map { buff =>
+      val fullReq = new DefaultFullHttpRequest(req.getProtocolVersion, req.getMethod, req.getUri, buff)
+      fullReq.headers.set(req.headers)
+      socketHandshake(ctx, fullReq, responder)
+    }
   }
+
 
   private def handleSocketFrame(ctx: ChannelHandlerContext, frame: WebSocketFrame): Unit = frame match {
     case frame: TextWebSocketFrame => enum.push(StringMessage(frame.text()))
@@ -78,51 +97,30 @@ class WebsocketHandler(responder: SocketResponder, nettyHandler: Http4sNetty)(im
       ctx.channel().write(new PongWebSocketFrame(frame.content().retain()))
   }
 
-  private def forward(ctx: ChannelHandlerContext, msg: AnyRef) {
-    ReferenceCountUtil.retain(msg)    // We will be releasing this ref, so need to inc to keep consistent
-    ctx.fireChannelRead(msg)
-  }
-
-  def startWebSocket(ctx: ChannelHandlerContext, req: http.HttpRequest): Iteratee[HttpChunk, Unit] = {
-    // Accumulate the rest of the chunks
-    val buff = ctx.alloc().buffer()
-    def folder(input: Input[HttpChunk]): Iteratee[HttpChunk, ByteBuf] = input match {
-      case Input.El(BodyChunk(bytes)) => buff.writeBytes(bytes.toArray); Cont(folder)
-      case Input.El(TrailerChunk(_)) => sys.error("Cannot accept trailers when staring a WebSocket.")  // TODO: is this correct exception behavior?
-      case Input.Empty => Cont(folder)
-      case Input.EOF => Done(buff)
-    }
-
-    Cont(folder).map { buff =>
-      val fullReq = new DefaultFullHttpRequest(req.getProtocolVersion, req.getMethod, req.getUri, buff)
-      fullReq.headers.set(req.headers)
-      socketHandshake(ctx, fullReq)
-    }
-  }
-
-  private def socketHandshake(ctx: ChannelHandlerContext, req: http.FullHttpRequest) {
+  private def socketHandshake(ctx: ChannelHandlerContext, req: http.FullHttpRequest, responder: SocketResponder) {
 
     val wsPath = "ws://" + req.headers().get(http.HttpHeaders.Names.HOST) + req.getUri
     val wsFactory = new WebSocketServerHandshakerFactory(wsPath, null, false)
 
     val handshaker = wsFactory.newHandshaker(req)
     if (handshaker == null) {  // Failure
+      logger.trace("Websocket failed: %s", wsPath)
       WebSocketServerHandshakerFactory.sendUnsupportedWebSocketVersionResponse(ctx.channel())
-      ??? // TODO: what to do on a failure?
-    } else initializeSocket(ctx, handshaker, req)
+      // TODO: what to do on a failure? Right now it we just send bad version, and let it run again.
+    } else {
+      logger.trace("Starting websocket: %s", wsPath)
+      initializeSocket(ctx, handshaker, req, responder)
+    }
   }
 
-  def initializeSocket(ctx: ChannelHandlerContext, handshaker: WebSocketServerHandshaker, req: http.FullHttpRequest) {
+  def initializeSocket(ctx: ChannelHandlerContext, handshaker: WebSocketServerHandshaker, req: http.FullHttpRequest, responder: SocketResponder) {
     // Refactor the pipeline
-
-    val p = ctx.pipeline()
-    p.remove(nettyHandler)
-    p.addLast("nettyWebSocketHandler", this)
-
+    ctx.pipeline().replace(nettyHandler, "nettyWebSocketHandler", this)
     handshaker.handshake(ctx.channel(), req)
+
+    // Connect the pipes and we are off.
     enum = new SocketEnum(handshaker)
     val (it, e) = responder.socket()
-
     enum.apply(it)
     e.run(Cont(socketMessageFolder(ctx)))
   }

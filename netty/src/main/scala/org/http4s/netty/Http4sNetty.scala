@@ -117,8 +117,8 @@ abstract class Http4sNetty(implicit executor: ExecutionContext)
     val handler = parser.flatMap {
       case responder: Responder => renderResponse(ctx, req, responder)
       case websocket: SocketResponder =>
-        val handler = new handlers.WebsocketHandler(websocket, this)
-          handler.startWebSocket(ctx, req)
+        val handler = new handlers.WebsocketHandler(this)
+          handler.startWebSocket(ctx, req, websocket)
 
       case _ =>
         renderResponse(ctx, req, InternalServerError())
