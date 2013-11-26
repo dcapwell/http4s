@@ -7,20 +7,27 @@ import xml.{Elem, XML, NodeSeq}
 import org.xml.sax.{SAXException, InputSource}
 import javax.xml.parsers.SAXParser
 import scala.util.{Success, Try}
-import play.api.libs.iteratee.Enumeratee.CheckDone
 import util.Execution.{overflowingExecutionContext => oec, trampoline => tec}
-import scala.concurrent.ExecutionContext
+import scala.concurrent.{Future, ExecutionContext}
 
-case class BodyParser[A](it: Iteratee[Chunk, Either[Response, A]]) {
-  def apply(f: A => Response): Iteratee[Chunk, Response] = it.map(_.right.map(f).merge)(oec)
-  def map[B](f: A => B)(implicit ec: ExecutionContext): BodyParser[B] = BodyParser(it.map[Either[Response, B]](_.right.map(f)))
-  def flatMap[B](f: A => BodyParser[B])(implicit ec: ExecutionContext): BodyParser[B] =
-    BodyParser(it.flatMap[Either[Response, B]](_.fold(
-      { response: Response => Done(Left(response)) },
-      { a: A => f(a).it }
-    )))
+case class BodyParser[A](parser: Spool[A] => Future[Either[Response, A]]) {
+  def apply(spool: Future[Spool[A]])(f: A => Future[Response])(implicit ec: ExecutionContext): Future[Response] = {
+    spool.flatMap(parser).flatMap(_.fold(Future.successful(_), f))
+  }
 
-  def joinRight[A1 >: A, B](implicit ev: <:<[A1, Either[Response, B]]): BodyParser[B] = BodyParser(it.map(_.joinRight)(oec))
+  def map[B](f: A => B)(implicit ec: ExecutionContext): BodyParser[B] = {
+    BodyParser(parser.andThen(_.map(_.right.map(f))))
+  }
+
+//  def flatMap[B](f: A => BodyParser[B])(implicit ec: ExecutionContext): BodyParser[B] =
+//    BodyParser(it.flatMap[Either[Response, B]](_.fold(
+//      { response: Response => Done(Left(response)) },
+//      { a: A => f(a).it }
+//    )))
+
+  def joinRight[A1 >: A, B](implicit ev: A1 <:< Either[Response, B]): BodyParser[B] = {
+    BodyParser(parser.andThen(f => f.map(_.joinRight)(oec)))
+  }
 }
 
 object BodyParser {
@@ -91,16 +98,16 @@ object BodyParser {
     }
     def continue[A](k: K[BodyChunk, A]) = Cont(step(k))
   }
-
-  // TODO: why are we using blocking file ops here!?!
-  // File operations
-  def binFile(file: java.io.File)(f: => Response)(implicit ec: ExecutionContext): Iteratee[Chunk,Response] = {
-    val out = new java.io.FileOutputStream(file)
-    whileBodyChunk &>> Iteratee.foreach[BodyChunk]{ d => out.write(d.toArray) }(ec).map{ _ => out.close(); f }(oec)
-  }
-
-  def textFile(req: RequestPrelude, in: java.io.File)(f: => Response)(implicit ec: ExecutionContext): Iteratee[Chunk,Response] = {
-    val is = new java.io.PrintStream(new FileOutputStream(in))
-    whileBodyChunk &>> Iteratee.foreach[BodyChunk]{ d => is.print(d.decodeString(req.charset)) }(ec).map{ _ => is.close(); f }(oec)
-  }
+//
+//  // TODO: why are we using blocking file ops here!?!
+//  // File operations
+//  def binFile(file: java.io.File)(f: => Response)(implicit ec: ExecutionContext): Iteratee[Chunk,Response] = {
+//    val out = new java.io.FileOutputStream(file)
+//    whileBodyChunk &>> Iteratee.foreach[BodyChunk]{ d => out.write(d.toArray) }(ec).map{ _ => out.close(); f }(oec)
+//  }
+//
+//  def textFile(req: RequestPrelude, in: java.io.File)(f: => Response)(implicit ec: ExecutionContext): Iteratee[Chunk,Response] = {
+//    val is = new java.io.PrintStream(new FileOutputStream(in))
+//    whileBodyChunk &>> Iteratee.foreach[BodyChunk]{ d => is.print(d.decodeString(req.charset)) }(ec).map{ _ => is.close(); f }(oec)
+//  }
 }

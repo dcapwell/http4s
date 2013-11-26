@@ -2,12 +2,13 @@ package org.http4s
 
 import play.api.libs.iteratee._
 import java.net.{URL, URI}
+import scala.concurrent.Future
 
 case class ResponsePrelude(status: Status, headers: HeaderCollection = HeaderCollection.empty)
 
 case class Response(
   prelude: ResponsePrelude,
-  body: ResponseBody = Response.EmptyBody,
+  body: Body = Response.EmptyBody,
   attributes: AttributeMap = AttributeMap.empty
 ) {
   def addHeader(header: Header) = copy(prelude = prelude.copy(headers = header +: prelude.headers))
@@ -37,7 +38,7 @@ case class Response(
 }
 
 object Response {
-  val EmptyBody: Enumeratee[Chunk, Chunk] = Enumeratee.heading(Enumerator.eof)
+  val EmptyBody: Future[Spool[Chunk]] = Future.successful(Spool.empty)
 
   implicit def response2Handler(response: Response): Iteratee[Chunk, Response] = Done(response)
 
@@ -101,7 +102,7 @@ object Status {
   object ResetContent extends Status(205, "Reset Content") with NoEntityResponderGenerator
   object PartialContent extends Status(206, "Partial Content") with EntityResponderGenerator {
     // TODO type this header
-    def apply(range: String, body: ResponseBody, headers: HeaderCollection = HeaderCollection.empty): Response =
+    def apply(range: String, body: Body, headers: HeaderCollection = HeaderCollection.empty): Response =
       Response(ResponsePrelude(this, Header("Range", range) +: headers), body)
   }
   object MultiStatus extends Status(207, "Multi-Status") with EntityResponderGenerator
@@ -119,7 +120,7 @@ object Status {
   object BadRequest extends Status(400, "Bad Request") with EntityResponderGenerator
   object Unauthorized extends Status(401, "Unauthorized") with EntityResponderGenerator {
     // TODO type this header
-    def apply(wwwAuthenticate: String, body: ResponseBody, headers: HeaderCollection = HeaderCollection.empty): Response =
+    def apply(wwwAuthenticate: String, body: Body, headers: HeaderCollection = HeaderCollection.empty): Response =
       Response(ResponsePrelude(this, Header("WWW-Authenticate", wwwAuthenticate) +: headers), body)
   }
   object PaymentRequired extends Status(402, "Payment Required") with EntityResponderGenerator
@@ -128,13 +129,13 @@ object Status {
     def apply(request: RequestPrelude): Response = apply(s"${request.pathInfo} not found")
   }
   object MethodNotAllowed extends Status(405, "Method Not Allowed") {
-    def apply(allowed: TraversableOnce[Method], body: ResponseBody, headers: HeaderCollection = HeaderCollection.empty): Response =
+    def apply(allowed: TraversableOnce[Method], body: Body, headers: HeaderCollection = HeaderCollection.empty): Response =
       Response(ResponsePrelude(this, Header("Allowed", allowed.mkString(", ")) +: headers), body)
   }
   object NotAcceptable extends Status(406, "Not Acceptable") with EntityResponderGenerator
   object ProxyAuthenticationRequired extends Status(407, "Proxy Authentication Required") {
     // TODO type this header
-    def apply(proxyAuthenticate: String, body: ResponseBody, headers: HeaderCollection = HeaderCollection.empty): Response =
+    def apply(proxyAuthenticate: String, body: Body, headers: HeaderCollection = HeaderCollection.empty): Response =
       Response(ResponsePrelude(this, Header("Proxy-Authenticate", proxyAuthenticate) +: headers), body)
   }
   object RequestTimeOut extends Status(408, "Request Time-out") with EntityResponderGenerator

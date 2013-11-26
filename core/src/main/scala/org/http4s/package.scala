@@ -9,10 +9,12 @@ import org.joda.time.format.DateTimeFormat
 import java.util.Locale
 import org.http4s.util.CaseInsensitiveStringSyntax
 
-package object http4s extends CaseInsensitiveStringSyntax {
-  type Route = PartialFunction[RequestPrelude, Iteratee[Chunk, Response]]
+import scala.concurrent.Future
 
-  type ResponseBody = Enumeratee[Chunk, Chunk]
+package object http4s extends CaseInsensitiveStringSyntax {
+  type Route = PartialFunction[(Body, RequestPrelude), Future[Response]]
+
+  type Body = Future[Spool[Chunk]]
 
   type Middleware = (Route => Route)
 

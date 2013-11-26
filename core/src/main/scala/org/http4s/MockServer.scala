@@ -9,24 +9,27 @@ import play.api.libs.iteratee.{Enumerator, Iteratee}
 class MockServer(route: Route)(implicit executor: ExecutionContext = ExecutionContext.global) {
   import MockServer.MockResponse
 
-  def apply(req: RequestPrelude, enum: Enumerator[Chunk]): Future[MockResponse] = {
+  def apply(req: RequestPrelude, body: Body): Future[MockResponse] = {
     try {
-      route.lift(req).fold(Future.successful(onNotFound)) { parser =>
-        val it: Iteratee[Chunk, MockResponse] = parser.flatMap { response =>
-          val responseBodyIt: Iteratee[BodyChunk, BodyChunk] = Iteratee.consume()
-          response.body ><> BodyParser.whileBodyChunk &>> responseBodyIt map { bytes: BodyChunk =>
-            MockResponse(response.prelude.status, response.prelude.headers, body = bytes.toArray, response.attributes)
-          }
+      route.lift((body,req)).fold(Future.successful(onNotFound))(_.flatMap { resp: Response =>
+        val status = resp.status
+        val prelude = resp.prelude
+        val body = resp.body
+        val attributes: AttributeMap = resp.attributes
+        resp.body.flatMap{ spool =>
+         spool.fold(BodyChunk())((c1: BodyChunk, c2: Chunk) => c2 match {
+           case c: BodyChunk => c1 ++ c
+           case e => c1
+         }).map(c => MockResponse(status, prelude.headers, c.toArray, attributes))
         }
-        enum.run(it)
-      }
+      })
     } catch {
       case t: Throwable => Future.successful(onError(t))
     }
   }
 
   def response(req: RequestPrelude,
-               body: Enumerator[Chunk] = Enumerator.eof,
+               body: Body = Response.EmptyBody,
                wait: Duration = 5.seconds): MockResponse = {
     Await.result(apply(req, body), 5.seconds)
   }
