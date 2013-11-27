@@ -316,10 +316,13 @@ object Spool {
 
   /** Acts as a gateway for the construction of lazy spool sources
     * Allows the delayed creation of the spool source until an access attempt
-    * @param tail Thunk which will start the lazy spool builder and get its future
+    * @param thunk Thunk which will start the lazy spool builder and get its future
     * @tparam A Type of result of this spool
     */
-  class LazyTail[A](tail: => Future[Spool[A]]) extends Future[Spool[A]] {
+  class LazyTail[A](thunk: => Future[Spool[A]]) extends Future[Spool[A]] {
+
+    private lazy val tail = thunk
+
     @throws(classOf[TimeoutException])
     @throws(classOf[InterruptedException])
     def ready(atMost: Duration)(implicit permit: CanAwait): this.type = {
@@ -373,9 +376,9 @@ abstract class BufferingSpoolSource[A](lowWater: Int, highWater: Int) {
 
   protected implicit def ec: ExecutionContext
   
-  def highWaterReached()
+  def highWaterReached(): Unit
   
-  def lowWaterReached()
+  def lowWaterReached(): Unit
   
   def close() {
     if (promiseRef != null) {
@@ -405,8 +408,6 @@ abstract class BufferingSpoolSource[A](lowWater: Int, highWater: Int) {
     
     if (ticks.incrementAndGet() > highWater) highWaterReached()
   }
-
-  
 
   def get() = {
     if (promiseRef == null) sys.error("Spool already closed")
