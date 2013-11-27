@@ -3,12 +3,8 @@ package org.http4s
 import scala.language.implicitConversions
 import scala.language.reflectiveCalls
 
-
-import play.api.libs.iteratee._
-
 import org.http4s.Header
 import org.scalatest.{WordSpec, Matchers}
-import scala.concurrent.Future
 
 class MockServerSpec extends WordSpec with Matchers {
   import concurrent.ExecutionContext.Implicits.global

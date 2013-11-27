@@ -4,9 +4,13 @@ package org.http4s
 import java.util.concurrent.atomic.AtomicReference
 import scala.annotation.tailrec
 import scala.collection.mutable.ArrayBuffer
-import scala.concurrent.{ExecutionContext, Await, Promise, Future}
-import scala.concurrent.duration.FiniteDuration
-import scala.util.{Failure, Success}
+import scala.concurrent._
+import scala.concurrent.duration.{Duration, FiniteDuration}
+import scala.util.{Try, Failure, Success}
+import org.http4s.Spool.LazyCons
+import scala.util.Failure
+import scala.Some
+import scala.util.Success
 
 /**
  * A spool is an asynchronous stream. It more or less
@@ -54,14 +58,28 @@ sealed trait Spool[+A] {
    * Apply {{f}} for each item in the spool, until the end.  {{f}} is
    * applied as the items become available.
    */
-  def foreach[B](f: A => B)(implicit executor: ExecutionContext) = foreachElem { _ foreach(f) }
+  def foreach(f: A => Any)(implicit executor: ExecutionContext): Future[Unit] = {
+    val p = Promise[Unit]
+    def go(spool: Spool[A]) {
+      if (spool.isEmpty) p.success(Unit)
+      else {
+        f(spool.head)
+        spool.tail.onComplete {
+          case Success(spool) => go(spool)
+          case Failure(t)     => p.failure(t)
+        }
+      }
+    }
+    go(this)
+    p.future
+  }
 
   /**
    * A version of {{foreach}} that wraps each element in an
    * {{Option}}, terminating the stream (EOF or failure) with
    * {{None}}.
    */
-  def foreachElem[B](f: Option[A] => B)(implicit executor: ExecutionContext) {
+  def foreachElem(f: Option[A] => Any)(implicit executor: ExecutionContext) {
     if (!isEmpty) {
       f(Some(head))
       // note: this hack is to avoid deep
@@ -84,21 +102,21 @@ sealed trait Spool[+A] {
   def zip[B](other: Spool[B])(implicit executor: ExecutionContext): Spool[(A,B)] = {
     def go(left: Future[Spool[A]], right: Future[Spool[B]]): Future[Spool[(A,B)]] = left.flatMap{ left =>
       if (!left.isEmpty) right.map { right =>
-        if (!right.isEmpty) new LazyCons((left.head, right.head))(go(left.tail, right.tail))
+        if (!right.isEmpty) new LazyCons((left.head, right.head), go(left.tail, right.tail))
         else Empty
       } else Future.successful(Empty)
     }
     if (this.isEmpty || other.isEmpty) Empty
-    else new LazyCons((this.head,other.head))(go(this.tail, other.tail))
+    else new LazyCons((this.head,other.head), go(this.tail, other.tail))
   }
 
   def interleave[B >: A](other: Spool[B])(implicit executor: ExecutionContext): Spool[B] = {
     def go(next: Spool[B], after: Spool[B]): Spool[B] = {
       if (next.isEmpty) after // Or do we want an empty?
-      else new LazyCons(next.head)(next.tail.map(tail => go(after, tail)))
+      else new LazyCons(next.head, next.tail.map(tail => go(after, tail)))
     }
     if (this.isEmpty) other
-    else new LazyCons[B](head)(tail.map(go(other, _)))
+    else new LazyCons[B](head, tail.map(go(other, _)))
   }
 
   def nondeterminateinterleave[B >: A](other: Spool[B])(implicit executor: ExecutionContext): Spool[B] = {
@@ -125,7 +143,7 @@ sealed trait Spool[+A] {
           if (right.isEmpty) next.tryCompleteWith(left)
           else {
             val p = Promise[Spool[B]]
-            if (next.trySuccess(new LazyCons(right.head)(p.future)))
+            if (next.trySuccess(new LazyCons(right.head, p.future)))
               p.completeWith(go(left, right.tail))
           }
 
@@ -134,7 +152,7 @@ sealed trait Spool[+A] {
 
       next.future
     }
-    cons(head, new LazyCons(other.head)(go(tail, other.tail)))
+    cons(head, new LazyCons(other.head, go(tail, other.tail)))
   }
 
   /**
@@ -146,14 +164,16 @@ sealed trait Spool[+A] {
    */
   def collect[B](f: PartialFunction[A, B])(implicit executor: ExecutionContext): Future[Spool[B]] = {
     val next_ = tail flatMap { _.collect(f) }
-    if (f.isDefinedAt(head)) Future.successful(new LazyCons(f(head))(next_))
+    if (f.isDefinedAt(head)) Future.successful(new LazyCons(f(head), next_))
     else next_
   }
 
   def map[B](f: A => B)(implicit executor: ExecutionContext): Spool[B] = {
-    val s = collect { case x => f(x) }
-    require(s.isCompleted)
-    s.value.get.get
+    def go(spool: Spool[A]): Spool[B] = {
+      if (spool.isEmpty) Empty
+      else new LazyCons(f(spool.head), spool.tail.map(go))
+    }
+    go(this)
   }
 
   def filter(f: A => Boolean)(implicit executor: ExecutionContext): Future[Spool[A]] = collect {
@@ -161,28 +181,28 @@ sealed trait Spool[+A] {
   }
 
   def fold[B](initial: B)(f: (B, A) => B)(implicit executor: ExecutionContext): Future[B] = {
-    def folder(state: B)(next: Future[Spool[A]]): Future[B] = {
+    def folder(state: B, next: Future[Spool[A]]): Future[B] = {
       next.flatMap{ next =>
         if(next.isEmpty) Future.successful(state)
         else {
-          folder(f(state, next.head))(next.tail)          // Will probably get into the recursion problem
+          folder(f(state, next.head), next.tail)          // Will probably get into the recursion problem
         }
       }
     }
-    folder(initial)(Future.successful(this))
+    folder(initial, Future.successful(this))
   }
 
   /**
    * Concatenates two spools.
    */
   def ++[B >: A](that: Spool[B])(implicit executor: ExecutionContext): Spool[B] =
-    if (isEmpty) that else new LazyCons[B](head)(tail map { _ ++ that })
+    if (isEmpty) that else new LazyCons[B](head, tail map { _ ++ that })
 
   /**
    * Concatenates two spools.
    */
   def ++[B >: A](that: Future[Spool[B]])(implicit executor: ExecutionContext): Future[Spool[B]] =
-    if (isEmpty) that else Future.successful(new LazyCons[B](head)(tail flatMap { _ ++ that }))
+    if (isEmpty) that else Future.successful(new LazyCons[B](head, tail flatMap { _ ++ that }))
 
   /**
    * Applies a function that generates a spool to each element in this spool,
@@ -218,8 +238,8 @@ object Spool {
 
   case object Empty extends Spool[Nothing] {
     override def isEmpty = true
-    def head = throw new NoSuchElementException("stream is empty")
-    def tail = throw new UnsupportedOperationException("stream is empty")
+    def head = throw new NoSuchElementException("spool is empty")
+    def tail = throw new UnsupportedOperationException("spool is empty")
     override def collect[B](f: PartialFunction[Nothing, B])(implicit executor: ExecutionContext) = Future.successful(this)
     override def toString = "Empty"
   }
@@ -240,14 +260,12 @@ object Spool {
     * @param thunktail Block that will be executed exactly once
     * @tparam A Type of value this Spool contains
     */
-  private class LazyCons[+A](val head: A)(thunktail: =>Future[Spool[A]] = Future.successful(Spool.empty)) extends Spool[A] {
-
-    private lazy val thunk = thunktail
+  final class LazyCons[+A](val head: A, thunktail: => Future[Spool[A]] = Future.successful(Spool.empty)) extends Spool[A] {
 
     /**
      * The (deferred) tail of the spool. Invalid for empty spools.
      */
-    def tail: Future[Spool[A]] = thunk
+    lazy val tail = thunktail
   }
 
   //def lazyCons[A](head: A)(tail: => Future[Spool[A]]): Spool[A] = new LazyCons(head, tail)
@@ -294,6 +312,105 @@ object Spool {
       if (s.isEmpty) None
       else Some((s.head, Await.result(s.tail, timeout)))
     }
+  }
+
+  /** Acts as a gateway for the construction of lazy spool sources
+    * Allows the delayed creation of the spool source until an access attempt
+    * @param tail Thunk which will start the lazy spool builder and get its future
+    * @tparam A Type of result of this spool
+    */
+  class LazyTail[A](tail: => Future[Spool[A]]) extends Future[Spool[A]] {
+    @throws(classOf[TimeoutException])
+    @throws(classOf[InterruptedException])
+    def ready(atMost: Duration)(implicit permit: CanAwait): this.type = {
+      tail.ready(atMost)(permit)
+      this
+    }
+
+    @throws(classOf[Exception])
+    def result(atMost: Duration)(implicit permit: CanAwait): Spool[A] = tail.result(atMost)(permit)
+
+    def onComplete[U](func: (Try[Spool[A]]) => U)(implicit executor: ExecutionContext): Unit =
+      tail.onComplete(func)(executor)
+
+    def isCompleted: Boolean = tail.isCompleted
+
+    def value: Option[Try[Spool[A]]] = tail.value
+  }
+}
+
+trait LazySpoolSource[A] {
+
+  implicit def ec: ExecutionContext
+
+  protected def getNext(): Future[Option[A]]
+
+  /** Gets the Future[Spool[A]] and starts the ball rolling
+    * @return The Future Spool[A]
+    */
+  def get(): Future[Spool[A]] = getNext().map  {
+    case Some(a) => new Spool.LazyCons(a, get())
+    case None    => Spool.Empty         // EOF
+  }
+}
+
+class InputStreamSpool(is: java.io.InputStream, buffersize: Int = 1024*20)(implicit val ec: ExecutionContext)
+  extends LazySpoolSource[BodyChunk] {
+
+  private val buffer = new Array[Byte](buffersize)
+
+  protected def getNext() = Future {
+    //println("Reading bytes.")
+    val bytes = is.read(buffer)
+    if (bytes > 0) {
+      val c = BodyChunk.fromArray(buffer, 0, bytes)
+      Some(c)
+    } else None
+  }
+}
+
+abstract class BufferingSpoolSource[A](lowWater: Int, highWater: Int) {
+
+  protected implicit def ec: ExecutionContext
+  
+  def highWaterReached()
+  
+  def lowWaterReached()
+  
+  def close() {
+    if (promiseRef != null) {
+      promiseRef.success(Spool.empty)
+      promiseRef = null
+    }
+  }
+  
+  private val ticks = new java.util.concurrent.atomic.AtomicInteger(0)
+
+  private var promiseRef: Promise[Spool[A]] = Promise[Spool[A]]
+
+  /** Offer an element to the spool
+    * This method is not thread safe! Make sure you call it sequentially
+    * @param a Value to to be placed on the spool
+    */
+  def offer(a: A) {
+    if (promiseRef == null) return    // Already finished
+    val p = promiseRef
+    promiseRef = Promise[Spool[A]]
+    p.success({
+      val p2 = promiseRef  // Get it this scope so it doesn't switch...
+      new LazyCons[A](a, {
+      if (ticks.decrementAndGet() <= lowWater) lowWaterReached()   // let the method know its good
+      p2.future
+    })})
+    
+    if (ticks.incrementAndGet() > highWater) highWaterReached()
+  }
+
+  
+
+  def get() = {
+    if (promiseRef == null) sys.error("Spool already closed")
+    promiseRef.future
   }
 }
 

@@ -13,6 +13,7 @@ import akka.util.ByteString
 import Http4sServlet._
 import scala.util.logging.Logged
 import com.typesafe.scalalogging.slf4j.Logging
+import scala.util.{Failure, Success}
 
 class Http4sServlet(route: Route, chunkSize: Int = DefaultChunkSize)
                    (implicit executor: ExecutionContext = ExecutionContext.global) extends HttpServlet with Logging {
@@ -37,27 +38,27 @@ class Http4sServlet(route: Route, chunkSize: Int = DefaultChunkSize)
   protected def handle(request: RequestPrelude, ctx: AsyncContext) {
     val servletRequest = ctx.getRequest.asInstanceOf[HttpServletRequest]
     val servletResponse = ctx.getResponse.asInstanceOf[HttpServletResponse]
-    val parser = try {
-      route.lift(request).getOrElse(Done(NotFound(request)))
-    } catch { case t: Throwable => Done[Chunk, Response](InternalServerError(t)) }
-    val handler = parser.flatMap { response =>
+
+    val fResponse: Future[Response] = try {
+      route.lift((new Spool.LazyTail(new InputStreamSpool(servletRequest.getInputStream).get()), request))
+        .getOrElse(Future(NotFound(request)))
+    } catch { case t: Throwable => Future.successful((InternalServerError(t))) }
+
+    fResponse.flatMap{ response =>
       servletResponse.setStatus(response.prelude.status.code, response.prelude.status.reason)
       for (header <- response.prelude.headers)
         servletResponse.addHeader(header.name.toString, header.value)
       val isChunked = response.isChunked
-      response.body.transform(Iteratee.foreach {
-        case BodyChunk(chunk) =>
-          val out = servletResponse.getOutputStream
-          out.write(chunk.toArray)
-          if(isChunked) out.flush()
-        case t: TrailerChunk =>
-          log("The servlet adapter does not implement trailers. Silently ignoring.")
-      })
-    }
-    Enumerator.fromStream(servletRequest.getInputStream, chunkSize)
-      .map[Chunk](BodyChunk(_))
-      .run(handler)
-      .onComplete(_ => ctx.complete() )
+
+      response.body.flatMap( _.foreach {
+            case BodyChunk(chunk) =>
+              val out = servletResponse.getOutputStream
+              out.write(chunk.toArray)
+              if(isChunked) out.flush()
+            case t: TrailerChunk =>
+              log("The servlet adapter does not implement trailers. Silently ignoring.")
+          })
+      }.onComplete(_ =>  ctx.complete())
   }
 
   protected def toRequest(req: HttpServletRequest): RequestPrelude = {
