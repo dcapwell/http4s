@@ -70,10 +70,9 @@ object ExampleRoute {
 //
 //      }))
 //
-//    case Get -> Root / "bigstring" =>
-//      Done{
-//        Ok((0 until 1000) map { i => s"This is string number $i" })
-//      }
+    case (_, Get -> Root / "bigstring") =>
+        Ok(Spool((0 until 1000) map { i => s"This is string number $i" }:_*))
+          .addHeader(Header.`Transfer-Encoding`(TransferCoding.chunked))
 //
     case (_, Get -> Root / "future") =>
       Ok(Future("Hello from the future!"))

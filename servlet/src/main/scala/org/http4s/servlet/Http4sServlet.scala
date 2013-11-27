@@ -48,17 +48,32 @@ class Http4sServlet(route: Route, chunkSize: Int = DefaultChunkSize)
       servletResponse.setStatus(response.prelude.status.code, response.prelude.status.reason)
       for (header <- response.prelude.headers)
         servletResponse.addHeader(header.name.toString, header.value)
+
       val isChunked = response.isChunked
 
-      response.body.flatMap( _.foreach {
+      response.body.flatMap( _.foreachUntil {
             case BodyChunk(chunk) =>
               val out = servletResponse.getOutputStream
               out.write(chunk.toArray)
-              if(isChunked) out.flush()
+              if(isChunked) {
+                try {            // BUG here with flush! It seems to kill ab HTTP 1.0 keep alive requests. Jetty responds
+                  out.flush()    // with a http 1.1 with keepalive but no length, but doesn't chunk or kill connection
+                  true           // Try not not be necessary if/when this gets fixed
+                } catch { case t: Throwable => false }
+              }
+              else true
+
             case t: TrailerChunk =>
-              log("The servlet adapter does not implement trailers. Silently ignoring.")
+              logger.warn("The servlet adapter does not implement trailers. Silently ignoring.")
+              false  // We are finished
           })
-      }.onComplete(_ =>  ctx.complete())
+      }.onComplete{ _try =>
+        _try match {
+          case Failure(t) => logger.error("Exception during route", t)
+          case _ =>    // Dump the remaining spool
+        }
+        ctx.complete()
+      }
   }
 
   protected def toRequest(req: HttpServletRequest): RequestPrelude = {

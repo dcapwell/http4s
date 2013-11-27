@@ -54,6 +54,27 @@ sealed trait Spool[+A] {
    */
   def tail: Future[Spool[A]]
 
+  /** Traverse the tail until f returns false or the end of the stream, returning the tail of the spool
+    * @param f method to execute until it returns fase
+    * @param executor Trampolining (hopefully, this method is recursive) execution context
+    * @return Remaining Spool
+    */
+  def foreachUntil(f: A => Boolean)(implicit executor: ExecutionContext): Future[Spool[A]] = {
+    val p = Promise[Spool[A]]
+    def go(spool: Spool[A]) {
+      if (spool.isEmpty) p.success(spool)
+      else {
+        if (f(spool.head)) spool.tail.onComplete {
+          case Success(spool) => go(spool)
+          case Failure(t)     => p.failure(t)
+        }
+        else p.completeWith(spool.tail)
+      }
+    }
+    go(this)
+    p.future
+  }
+
   /**
    * Apply {{f}} for each item in the spool, until the end.  {{f}} is
    * applied as the items become available.
