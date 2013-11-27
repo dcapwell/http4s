@@ -5,7 +5,8 @@ import scala.language.postfixOps      // the http4s team resents importing this.
 import play.api.libs.iteratee.Enumerator
 import org.http4s.Status._
 import akka.util.ByteString
-import concurrent.Future
+import scala.concurrent.{Await, Future}
+import scala.concurrent.duration._
 import org.scalatest.{Matchers, WordSpec}
 
 /**
@@ -17,7 +18,7 @@ class WritableSpec extends WordSpec with Matchers {
     import Writable._
 
     def route(in: Route): String =
-      new String(new MockServer(in).response(RequestPrelude(), Enumerator.eof[Chunk]).body)
+      new String(new MockServer(in).response(RequestPrelude(), Spool.empty).body)
 
 
     "Get Strings" in {

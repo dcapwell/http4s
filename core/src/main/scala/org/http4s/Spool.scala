@@ -84,21 +84,21 @@ sealed trait Spool[+A] {
   def zip[B](other: Spool[B])(implicit executor: ExecutionContext): Spool[(A,B)] = {
     def go(left: Future[Spool[A]], right: Future[Spool[B]]): Future[Spool[(A,B)]] = left.flatMap{ left =>
       if (!left.isEmpty) right.map { right =>
-        if (!right.isEmpty) lazyCons((left.head, right.head))(go(left.tail, right.tail))
+        if (!right.isEmpty) new LazyCons((left.head, right.head))(go(left.tail, right.tail))
         else Empty
       } else Future.successful(Empty)
     }
     if (this.isEmpty || other.isEmpty) Empty
-    else lazyCons((this.head,other.head))(go(this.tail, other.tail))
+    else new LazyCons((this.head,other.head))(go(this.tail, other.tail))
   }
 
   def interleave[B >: A](other: Spool[B])(implicit executor: ExecutionContext): Spool[B] = {
     def go(next: Spool[B], after: Spool[B]): Spool[B] = {
       if (next.isEmpty) after // Or do we want an empty?
-      else lazyCons(next.head)(next.tail.map(tail => go(after, tail)))
+      else new LazyCons(next.head)(next.tail.map(tail => go(after, tail)))
     }
     if (this.isEmpty) other
-    else lazyCons[B](head)(tail.map(go(other, _)))
+    else new LazyCons[B](head)(tail.map(go(other, _)))
   }
 
   def nondeterminateinterleave[B >: A](other: Spool[B])(implicit executor: ExecutionContext): Spool[B] = {
@@ -125,7 +125,7 @@ sealed trait Spool[+A] {
           if (right.isEmpty) next.tryCompleteWith(left)
           else {
             val p = Promise[Spool[B]]
-            if (next.trySuccess(lazyCons(right.head)(p.future)))
+            if (next.trySuccess(new LazyCons(right.head)(p.future)))
               p.completeWith(go(left, right.tail))
           }
 
@@ -134,7 +134,7 @@ sealed trait Spool[+A] {
 
       next.future
     }
-    cons(head, lazyCons(other.head)(go(tail, other.tail)))
+    cons(head, new LazyCons(other.head)(go(tail, other.tail)))
   }
 
   /**
@@ -146,7 +146,7 @@ sealed trait Spool[+A] {
    */
   def collect[B](f: PartialFunction[A, B])(implicit executor: ExecutionContext): Future[Spool[B]] = {
     val next_ = tail flatMap { _.collect(f) }
-    if (f.isDefinedAt(head)) Future.successful(lazyCons(f(head))(next_))
+    if (f.isDefinedAt(head)) Future.successful(new LazyCons(f(head))(next_))
     else next_
   }
 
@@ -176,13 +176,13 @@ sealed trait Spool[+A] {
    * Concatenates two spools.
    */
   def ++[B >: A](that: Spool[B])(implicit executor: ExecutionContext): Spool[B] =
-    if (isEmpty) that else lazyCons[B](head)(tail map { _ ++ that })
+    if (isEmpty) that else new LazyCons[B](head)(tail map { _ ++ that })
 
   /**
    * Concatenates two spools.
    */
   def ++[B >: A](that: Future[Spool[B]])(implicit executor: ExecutionContext): Future[Spool[B]] =
-    if (isEmpty) that else Future.successful(lazyCons[B](head)(tail flatMap { _ ++ that }))
+    if (isEmpty) that else Future.successful(new LazyCons[B](head)(tail flatMap { _ ++ that }))
 
   /**
    * Applies a function that generates a spool to each element in this spool,
@@ -240,7 +240,7 @@ object Spool {
     * @param thunktail Block that will be executed exactly once
     * @tparam A Type of value this Spool contains
     */
-  private class LazyCons[+A](val head: A, thunktail: =>Future[Spool[A]] = Future.successful(Spool.empty)) extends Spool[A] {
+  private class LazyCons[+A](val head: A)(thunktail: =>Future[Spool[A]] = Future.successful(Spool.empty)) extends Spool[A] {
 
     private lazy val thunk = thunktail
 
@@ -250,7 +250,7 @@ object Spool {
     def tail: Future[Spool[A]] = thunk
   }
 
-  def lazyCons[A](head: A)(tail: => Future[Spool[A]]): Spool[A] = new LazyCons(head, tail)
+  //def lazyCons[A](head: A)(tail: => Future[Spool[A]]): Spool[A] = new LazyCons(head, tail)
 
   def cons[A](value: A, next: Future[Spool[A]] = Future.successful(empty)): Spool[A] = new EagerCons(value, next)
 

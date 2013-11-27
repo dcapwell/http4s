@@ -6,12 +6,14 @@ import java.io._
 import xml.{Elem, XML, NodeSeq}
 import org.xml.sax.{SAXException, InputSource}
 import javax.xml.parsers.SAXParser
-import scala.util.{Success, Try}
+import scala.util.{Failure, Success, Try}
 import util.Execution.{overflowingExecutionContext => oec, trampoline => tec}
-import scala.concurrent.{Future, ExecutionContext}
+import scala.concurrent.{Promise, Future, ExecutionContext}
+import scala.util.control.NonFatal
+import akka.util.ByteString
 
-case class BodyParser[A](parser: Spool[A] => Future[Either[Response, A]]) {
-  def apply(spool: Future[Spool[A]])(f: A => Future[Response])(implicit ec: ExecutionContext): Future[Response] = {
+case class BodyParser[A](parser: Spool[Chunk] => Future[Either[Response, A]]) {
+  def apply(spool: Future[Spool[Chunk]])(f: A => Future[Response])(implicit ec: ExecutionContext): Future[Response] = {
     spool.flatMap(parser).flatMap(_.fold(Future.successful(_), f))
   }
 
@@ -31,15 +33,21 @@ case class BodyParser[A](parser: Spool[A] => Future[Either[Response, A]]) {
 }
 
 object BodyParser {
+  private implicit val ec = tec
+
   val DefaultMaxEntitySize = Http4sConfig.getInt("org.http4s.default-max-entity-size")
 
-  private val BodyChunkConsumer: Iteratee[BodyChunk, BodyChunk] = Iteratee.consume[BodyChunk]()
+//  implicit def bodyParserToResponderIteratee(bodyParser: BodyParser[Response]): Iteratee[Chunk, Response] =
+//    bodyParser(identity)
 
-  implicit def bodyParserToResponderIteratee(bodyParser: BodyParser[Response]): Iteratee[Chunk, Response] =
-    bodyParser(identity)
+  def text[A](charset: CharacterSet, limit: Int = DefaultMaxEntitySize): BodyParser[String] = {
+    def go(s: Spool[Chunk]): Future[Either[Response, String]] = {
+      consumeUpTo(s, limit)
+        .map(_.fold[Either[Response, String]](Left(Status.RequestEntityTooLarge()))(c => Right(c.decodeString(charset))))
+    }
+    BodyParser(go)
+  }
 
-  def text[A](charset: CharacterSet, limit: Int = DefaultMaxEntitySize): BodyParser[String] =
-    consumeUpTo(BodyChunkConsumer, limit).map(_.decodeString(charset))(oec)
 
   /**
    * Handles a request body as XML.
@@ -56,48 +64,59 @@ object BodyParser {
           limit: Int = DefaultMaxEntitySize,
           parser: SAXParser = XML.parser,
           onSaxException: SAXException => Response = { saxEx => /*saxEx.printStackTrace();*/ Status.BadRequest() })
-  : BodyParser[Elem] =
-    consumeUpTo(BodyChunkConsumer, limit).map { bytes =>
+  : BodyParser[Elem] = {
+    implicit val ec = tec
+    def go(s: Spool[Chunk]) = consumeUpTo(s, limit).map (_.fold[Either[Response,Elem]](Left(Status.RequestEntityTooLarge())){ bytes =>
       val in = bytes.iterator.asInputStream
       val source = new InputSource(in)
       source.setEncoding(charset.name)
       Try(XML.loadXML(source, parser)).map(Right(_)).recover {
         case e: SAXException => Left(onSaxException(e))
       }.get
-    }(tec).joinRight
+    })
 
-  def ignoreBody: BodyParser[Unit] = BodyParser(whileBodyChunk &>> Iteratee.ignore[BodyChunk].map(Right(_))(oec))
-
-  def trailer: BodyParser[TrailerChunk] = BodyParser(
-    Enumeratee.dropWhile[Chunk](_.isInstanceOf[BodyChunk])(oec) &>>
-      (Iteratee.head[Chunk].map {
-        case Some(trailer: TrailerChunk) => Right(trailer)
-        case _ =>                           Right(TrailerChunk())
-      }(oec)))
-
-  def consumeUpTo[A](consumer: Iteratee[BodyChunk, A], limit: Int = DefaultMaxEntitySize): BodyParser[A] = {
-    implicit val ec = tec   // for ec requirements in the for comprehension
-    val it = for {
-      a <- Traversable.takeUpTo[BodyChunk](limit) &>> consumer
-      tooLargeOrA <- Iteratee.eofOrElse(Status.RequestEntityTooLarge())(a)
-    } yield tooLargeOrA
-    BodyParser(whileBodyChunk &>> it)
+    BodyParser(go)
   }
 
-  val whileBodyChunk: Enumeratee[Chunk, BodyChunk] = new CheckDone[Chunk, BodyChunk] {
-    def step[A](k: K[BodyChunk, A]): K[Chunk, Iteratee[BodyChunk, A]] = {
-      case in @ Input.El(e: BodyChunk) =>
-        new CheckDone[Chunk, BodyChunk] {
-          def continue[A](k: K[BodyChunk, A]) = Cont(step(k))
-        } &> k(in.asInstanceOf[Input[BodyChunk]])
-      case in @ Input.El(e) =>
-        Done(Cont(k), in)
-      case in @ Input.Empty =>
-        new CheckDone[Chunk, BodyChunk] { def continue[A](k: K[BodyChunk, A]) = Cont(step(k)) } &> k(in)
-      case Input.EOF => Done(Cont(k), Input.EOF)
+  def trailer: BodyParser[Option[TrailerChunk]] = {
+    def folder(s: Spool[Chunk]): Future[Either[Response, Option[TrailerChunk]]] = {
+      val p = Promise[Either[Response, Option[TrailerChunk]]]
+      def go(s: Spool[Chunk]): Unit = {
+        if (s.isEmpty) p.success(Right(None))
+        else {
+          if (p.isInstanceOf[TrailerChunk]) p.success(Right(Some(p.asInstanceOf[TrailerChunk])))
+          else s.tail.onComplete {
+            case Success(s) => go(s)
+            case Failure(t) => p.failure(t)
+          }
+        }
+
+      }
+      p.future
     }
-    def continue[A](k: K[BodyChunk, A]) = Cont(step(k))
+    BodyParser(folder)
   }
+
+  def consumeUpTo(spool: Spool[Chunk], limit: Int = DefaultMaxEntitySize): Future[Option[BodyChunk]] = {
+    // Dont flatmap a million futures.
+    val p = Promise[Option[BodyChunk]]
+    def go(total: ByteString, s: Spool[Chunk], size: Int): Unit = {
+      if (s.isEmpty || !s.head.isInstanceOf[BodyChunk]) p.success(Some(BodyChunk(total)))
+      else {
+        val c = s.head.asInstanceOf[BodyChunk]
+        val sz = c.length + size
+        if (sz > limit) p.success(None)
+        else s.tail.onComplete {
+          case Success(s) => go(total ++ c.bytes, s, sz)
+          case Failure(t) => p.failure(t)
+        }
+      
+      }
+    }
+    go(ByteString.empty, spool, 0)
+    p.future
+  }
+
 //
 //  // TODO: why are we using blocking file ops here!?!
 //  // File operations

@@ -57,14 +57,14 @@ object Writable {
     }
 
   // More complex types can be implements in terms of simple types
-//  implicit def traversableWritable[A](implicit writable: SimpleWritable[A]) =
-//    new Writable[TraversableOnce[A]] {
-//      def contentType: ContentType = writable.contentType
-//      override def toBody(as: TraversableOnce[A]) = {
-//        val bs = as.foldLeft(ByteString.empty) { (acc, a) => acc ++ writable.asByteString(a) }
-//        (sendByteString(bs), Some(bs.length))
-//      }
-//    }
+  implicit def traversableWritable[A](implicit writable: SimpleWritable[A]) =
+    new Writable[TraversableOnce[A]] {
+      def contentType: ContentType = writable.contentType
+      override def toBody(as: TraversableOnce[A]) = {
+        val bs = as.foldLeft(ByteString.empty) { (acc, a) => acc ++ writable.asByteString(a) }
+        (Future.successful(Spool.cons(BodyChunk(bs))), Some(bs.length))
+      }
+    }
 //
 //  implicit def enumerateeWritable =
 //  new Writable[Enumeratee[Chunk, Chunk]] {
@@ -87,6 +87,14 @@ object Writable {
 //    def contentType = writable.contentType
 //    override def toBody(a: Enumerator[A]) = (sendEnumerator(a.map[Chunk]{ i => BodyChunk(writable.asByteString(i))}(oec)), None)
 //  }
+
+  implicit def spoolWritable[A](implicit writable: SimpleWritable[A], ec: ExecutionContext) =
+  new Writable[Spool[A]] {
+    def contentType: ContentType = writable.contentType
+
+    def toBody(a: Spool[A]): (_root_.org.http4s.Body, Option[Int]) =
+      (Future.successful(a.map(a => BodyChunk(writable.asByteString(a)))), None)
+  }
 
   implicit def futureWritable[A](implicit writable: SimpleWritable[A], ec: ExecutionContext) =
   new Writable[Future[A]] {

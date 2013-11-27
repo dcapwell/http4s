@@ -14,7 +14,6 @@ class MockServer(route: Route)(implicit executor: ExecutionContext = ExecutionCo
       route.lift((body,req)).fold(Future.successful(onNotFound))(_.flatMap { resp: Response =>
         val status = resp.status
         val prelude = resp.prelude
-        val body = resp.body
         val attributes: AttributeMap = resp.attributes
         resp.body.flatMap{ spool =>
          spool.fold(BodyChunk())((c1: BodyChunk, c2: Chunk) => c2 match {
@@ -29,9 +28,9 @@ class MockServer(route: Route)(implicit executor: ExecutionContext = ExecutionCo
   }
 
   def response(req: RequestPrelude,
-               body: Body = Response.EmptyBody,
+               body: Spool[Chunk] = Spool.empty,
                wait: Duration = 5.seconds): MockResponse = {
-    Await.result(apply(req, body), 5.seconds)
+    Await.result(apply(req, Future.successful(body)), 2.seconds)
   }
 
   def onNotFound: MockResponse = MockResponse(statusLine = Status.NotFound)

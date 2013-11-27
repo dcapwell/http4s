@@ -10,6 +10,8 @@ object ExampleRoute {
   import Writable._
   import BodyParser._
 
+  import scala.concurrent.ExecutionContext.Implicits.global
+
   val MyVar = AttributeKey[String]("myVar")
 
   /*
@@ -22,85 +24,77 @@ object ExampleRoute {
 
   import Method._
 
-  import PushSupport._
+//  import PushSupport._
 
   def apply(implicit executor: ExecutionContext = ExecutionContext.global): Route = {
 
-    case Req(Get, "/push") =>
-      Ok("Pushing: ").push("/pushed")
+//    case Req(Get, "/push") =>
+//      Ok("Pushing: ").push("/pushed")
+//
+//    case Req(Get, "/pushed") =>
+//      Ok("Pushed").push("/ping")
 
-    case Req(Get, "/pushed") =>
-      Ok("Pushed").push("/ping")
-
-    case Req(Get, "/ping") =>
+    case (_, Req(Get, "/ping")) =>
       Ok("pong")
 
-    case Req(Post, "/echo") =>
-      Ok(Enumeratee.passAlong[Chunk])
+    case (body, Req(Post, "/echo")) =>
+      Response(ResponsePrelude(Status.Ok), body)
 
-    case Req(Get, "/echo") =>
-      Ok(Enumeratee.map[Chunk] {
-        case BodyChunk(e) => BodyChunk(e.slice(6, e.length)): Chunk
-        case chunk => chunk
-      })
+//    case (_, Req(Get, "/echo2")) =>
+//      Ok(Enumeratee.map[Chunk]{
+//        case BodyChunk(e) => BodyChunk(e.slice(6, e.length)): Chunk
+//        case chunk => chunk
+//      })
 
-    case Req(Get, "/echo2") =>
-      Ok(Enumeratee.map[Chunk]{
-        case BodyChunk(e) => BodyChunk(e.slice(6, e.length)): Chunk
-        case chunk => chunk
-      })
-
-    case req @ Req(Post, "/sum")  =>
-      text(req.charset, 16) { s =>
+    case (body, req @ Req(Post, "/sum"))  =>
+      text(req.charset, 16)(body){ s =>
         val sum = s.split('\n').map(_.toInt).sum
         Ok(sum)
       }
 
-    case Req(Post, "/trailer") =>
-      trailer(t => Ok(t.headers.length))
+//    case (body, Req(Post, "/trailer")) =>
+//      trailer(body)(t => t.fold(BadRequest())(t => Ok(t.headers.length)))
+//
+//    case (body, req @ Req(Post, "/body-and-trailer")) =>
+//      for {
+//        body <- text(req.charset)
+//        trailer <- trailer
+//      } yield trailer.headers.find(_.name == "hi".ci).fold(InternalServerError()){ hi =>  Ok(s"$body\n${hi.value}") }
+//
+//    case (_, req @ Req(Get, "/stream")) =>
+//      Ok(Concurrent.unicast[ByteString]({
+//        channel =>
+//          for (i <- 1 to 10) {
+//            channel.push(ByteString("%d\n".format(i), req.charset.name))
+//            Thread.sleep(1000)
+//          }
+//          channel.eofAndEnd()
+//      }))
 
-    case req @ Req(Post, "/body-and-trailer") =>
-      for {
-        body <- text(req.charset)
-        trailer <- trailer
-      } yield trailer.headers.find(_.name == "hi".ci).fold(InternalServerError()){ hi =>  Ok(s"$body\n${hi.value}") }
-
-    case req @ Req(Get, "/stream") =>
-      Ok(Concurrent.unicast[ByteString]({
-        channel =>
-          for (i <- 1 to 10) {
-            channel.push(ByteString("%d\n".format(i), req.charset.name))
-            Thread.sleep(1000)
-          }
-          channel.eofAndEnd()
-      }))
-
-    case Req(Get, "/bigstring") =>
+    case (_, Req(Get, "/bigstring")) =>
       val builder = new StringBuilder(20*1028)
       Ok((0 until 1000) map { i => s"This is string number $i" })
 
-    case Req(Get, "/future") =>
-      Done{
-        Ok(Future("Hello from the future!"))
-      }
+    case (_, Req(Get, "/future")) =>
+      Ok(Future("Hello from the future!"))
 
       // Ross wins the challenge
-    case req @ Req(Get, "/challenge") =>
-      Iteratee.head[Chunk].map {
-        case Some(bits: BodyChunk) if (bits.decodeString(req.charset)).startsWith("Go") =>
-          Ok(Enumeratee.heading(Enumerator(bits: Chunk)))
-        case Some(bits: BodyChunk) if (bits.decodeString(req.charset)).startsWith("NoGo") =>
-          BadRequest("Booo!")
-        case _ =>
-          BadRequest("No data!")
-      }
+//    case (_, req @ Req(Get, "/challenge")) =>
+//      Iteratee.head[Chunk].map {
+//        case Some(bits: BodyChunk) if (bits.decodeString(req.charset)).startsWith("Go") =>
+//          Ok(Enumeratee.heading(Enumerator(bits: Chunk)))
+//        case Some(bits: BodyChunk) if (bits.decodeString(req.charset)).startsWith("NoGo") =>
+//          BadRequest("Booo!")
+//        case _ =>
+//          BadRequest("No data!")
+//      }
 
-    case req @ Req(Get, "/root-element-name") =>
-      xml(req.charset) { elem =>
+    case (body, req @ Req(Get, "/root-element-name")) =>
+      xml(req.charset)(body){ elem =>
         Ok(elem.label)
       }
 
-    case Req(Get, "/html") =>
+    case (_, Req(Get, "/html")) =>
       Ok(
         <html><body>
           <div id="main">
@@ -110,7 +104,7 @@ object ExampleRoute {
         </body></html>
       )
 
-    case Req(Get, "/fail") =>
+    case (_, Req(Get, "/fail")) =>
       sys.error("FAIL")
   }
 }

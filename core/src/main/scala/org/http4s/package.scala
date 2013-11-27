@@ -31,5 +31,7 @@ package object http4s extends CaseInsensitiveStringSyntax {
     def formatRfc1123: String = Rfc1123Format.print(instant)
   }
 
+  implicit def responseToFuture(resp: Response): Future[Response] = Future.successful(resp)
+
   val UnixEpoch = new DateTime(0)
 }
